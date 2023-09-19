@@ -92,6 +92,7 @@ def init_weights(m):
         nn.init.normal_(m.weight, mean = 0, std = 0.1)
         nn.init.constant_(m.bias, 0.1)
 
+#PPO network
 class Actor_Critic(nn.Module):
     def __init__(self, num_inputs_layer, num_outputs, action_type = 'continuous', std = 0.0):
         super(Actor_Critic, self).__init__()
@@ -142,6 +143,16 @@ def compute_gae(gamma, lam, next_value, rewards, masks, values):
         gae = delta + gamma * lam * masks[step] * gae               # Advantage
         returns.insert(0, gae + values[step])                       # Advantage + value = return
     return returns
+
+def ppo_iter(mini_batch_size, states, actions, log_probs, returns, advantage):
+    batch_size = states.size(0)
+    print(batch_size)
+    for _ in range(batch_size // mini_batch_size):
+        rand_ids = np.random.randint(0, batch_size, mini_batch_size)
+
+        #return one mini_batch
+        yield states[rand_ids, :], actions[rand_ids, :], log_probs[rand_ids, :], returns[rand_ids, :], advantage[rand_ids, :]   #how does the mini_batch be divided?
+
 
 
 def ppo_update(clip_coef, vf_coef, entro_coef, ppo_epochs, mini_batch_size, states, actions, log_probs, returns, advantages):
@@ -200,6 +211,8 @@ def ppo_update(clip_coef, vf_coef, entro_coef, ppo_epochs, mini_batch_size, stat
 
 if __name__ == "__main__":
     args = parse_args()
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda" if use_cuda else "cpu")
     vis = False
 
     #create enviroment
@@ -225,12 +238,12 @@ if __name__ == "__main__":
 
     #initial wandb track
     if args.wandb_track:
-    wandb.init(
-        project = "PPO_Atari",
-        config=vars(args),
-        name = f"{args.exp_name}_{args.env_name}_{int(time.time())}",
-        save_code=True
-    )
+        wandb.init(
+            project = "PPO_Atari",
+            config=vars(args),
+            name = f"{args.exp_name}_{args.env_name}_{int(time.time())}",
+            save_code=True
+        )
 
     wandb.define_metric("global_step")
 
