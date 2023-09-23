@@ -120,8 +120,9 @@ class Actor_Critic(nn.Module):
 
 
     def forward(self, x):
-        x = self.shared_net(x/255.0)                     #scaling the observation
-        value = self.critic(x)                         #critic net outputs value of a state
+        x = self.shared_net(x/255.0)
+        value = self.critic(x)
+         #critic net outputs value of a state
         if self.action_type == 'continuous':               #continuous action space
             mu = self.actor(x)                             #action net ouputs the mean of the pi(a | x)
             std = self.log_std.exp().expand_as(mu)         #get a covariance matrix
@@ -130,6 +131,11 @@ class Actor_Critic(nn.Module):
             logits = self.actor(x)
             dist = Categorical(logits = logits)
         return dist, value
+    
+    def get_value(self, x):
+        x = self.shared_net(x/255.0)
+        value = self.critic(x)
+        return value
 
 
 def compute_gae(gamma, lam, next_value, rewards, masks, values):
@@ -146,7 +152,6 @@ def compute_gae(gamma, lam, next_value, rewards, masks, values):
 
 def ppo_iter(mini_batch_size, states, actions, log_probs, returns, advantage):
     batch_size = states.size(0)
-    print(batch_size)
     for _ in range(batch_size // mini_batch_size):
         rand_ids = np.random.randint(0, batch_size, mini_batch_size)
 
@@ -278,7 +283,8 @@ if __name__ == "__main__":
         # generate num_envs trajectories with num_steps of old policy
         for _ in range(args.horizon):
             state = torch.FloatTensor(state).to(device)    # state: (num_env)x4x84x84
-            dist, value = model(state)
+            with torch.no_grad():
+                dist, value = model(state)
 
             # sample a torch action from policy pi(a|s)
             action = dist.sample()                         # action: (num_env)x1 (continuous) 8 (discrete)
@@ -287,7 +293,7 @@ if __name__ == "__main__":
 
 
             # interact to the envs
-            next_state, reward, done, _ = envs.step(action.cpu().numpy())   #send action to cpu and convert it to numpy
+            next_state, reward, done, info = envs.step(action.cpu().numpy())   #send action to cpu and convert it to numpy
 
 
 
@@ -308,10 +314,9 @@ if __name__ == "__main__":
 
             state = next_state
             step += 1 * args.num_env
-
-        # Evaluation over 5 episodes
-            if step % 1000 == 0:
-                test_reward = np.mean([test_env(model=model) for _ in range(5)])
+            # Evaluation over 1 episodes
+            if step % 5000 == 0:
+                test_reward = np.mean([test_env(model=model) for _ in range(1)])
                 if test_reward > best_reward:
                     best_reward = test_reward
                     torch.save(model.state_dict(), "best_model.pt")
@@ -326,8 +331,10 @@ if __name__ == "__main__":
                     if test_reward >= threshold_reward: early_stop = True
 
 
+
             next_state = torch.FloatTensor(next_state).to(device)
-            _, next_value = model(next_state)
+        with torch.no_grad():
+            next_value = model.get_value(next_state)
 
             # compputing generalized advantage estimation
             returns = compute_gae(args.gamma, args.lam, next_value, rewards, masks, values)
