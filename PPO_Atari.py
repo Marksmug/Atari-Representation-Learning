@@ -30,7 +30,8 @@ def parse_args():
     parser.add_argument("--lr", type=float, default = 2.5e-4, help = "learning rate of the NN")
     parser.add_argument("--seed", type=int, default=1, help = "seed of the experiment")
     parser.add_argument("--max-step", type=int, default=10000000, help = "the maximum step of the experiment")
-    parser.add_argument("--wandb-track", type=bool, default=True, help="the flag of tracking the experiment data")
+    parser.add_argument("--wandb-track", type=bool, default=False, help="the flag of tracking the experiment data")
+    parser.add_argument("--seed-value", type=int, default=1, help="seed of the experiment")
 
     # Agent specific arguments
     parser.add_argument("--num-env", type=int, default=8, help = "the number of parallel environments")
@@ -50,13 +51,16 @@ def parse_args():
 
     return args
 
-def make_env(vis, env_name):
+def make_env(vis, env_name, seed):
     def _thunk():
         env = gym.make(env_name)
         # revcording the agent performance
         if vis: env = gym.wrappers.RecordVideo(env, f"videos")
         env = AtariPreprocessing(env, screen_size=84, terminal_on_life_loss=True,grayscale_obs=True, frame_skip=4, noop_max=30)
         env = gym.wrappers.FrameStack(env,4)
+        env.seed(seed)
+        env.action_space.seed(seed)
+        env.observation_space.seed(seed)
         return env
     return _thunk
 
@@ -77,8 +81,9 @@ def test_env(vis = False, model = None):
     while not done:
         state = torch.FloatTensor(state).unsqueeze(0).to(device)
         if model is not None:
-            dist, _ = model(state)
-            action = dist.sample().cpu().numpy()[0]
+            with torch.no_grad():
+                dist, _ = model(state)
+                action = dist.sample().cpu().numpy()[0]
         else:
             action = np.random.randint(4)
         next_state, reward, done, _ = env.step(action)
@@ -219,9 +224,14 @@ if __name__ == "__main__":
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
     vis = False
+    # seed the experiment
+    random.seed(args.seed_value)
+    np.random.seed(args.seed_value)
+    torch.manual_seed(args.seed_value)
 
-    #create enviroment
-    envs = [make_env(vis, args.env_name) for i in range(args.num_env)]
+
+    #create enviroment with different seeds
+    envs = [make_env(vis, args.env_name, seed=args.seed_value+i) for i in range(args.num_env)]
     envs = gym.vector.SyncVectorEnv(envs)
     env = gym.make("BreakoutNoFrameskip-v4")
     env = AtariPreprocessing(env, screen_size=84, grayscale_obs=True, frame_skip=4, noop_max=30)
@@ -242,6 +252,7 @@ if __name__ == "__main__":
 
 
     #initial wandb track
+    print(args.wandb_track)
     if args.wandb_track:
         wandb.init(
             project = "PPO_Atari",
@@ -249,13 +260,13 @@ if __name__ == "__main__":
             name = f"{args.exp_name}_{args.env_name}_{int(time.time())}",
             save_code=True
         )
-
-    wandb.define_metric("global_step")
+        wandb.define_metric("global_step")
 
     max_step = args.max_step
     step = 0
     test_rewards = []
     best_reward = 0
+    current_reward_envs = np.zeros(args.num_env)
 
     max_updates = max_step // args.batch_size
     num_updates = 0
@@ -294,8 +305,25 @@ if __name__ == "__main__":
 
             # interact to the envs
             next_state, reward, done, info = envs.step(action.cpu().numpy())   #send action to cpu and convert it to numpy
+            
+            
+            #current_reward_envs = current_reward_envs + reward
+            for env_index in range(args.num_env):
+                if not done[env_index]: 
+                    current_reward_envs[env_index] = current_reward_envs[env_index] + reward[env_index]
+                else:
+                    print(f"global step = {step}, episodic reward = {current_reward_envs[env_index]}")
+                    
+                    if args.wandb_track:
+                        wandb.define_metric("Episodic_reward", step_metric="Global_step")
+                        wandb.log(
+                        {"Episodic_reward": current_reward_envs[env_index],
+                        "  Global_step": step}
+                    )
+                    if current_reward_envs[env_index] >= threshold_reward: early_stop = True
+                    current_reward_envs[env_index] = 0
 
-
+                #if reward[env_index] > 0: print(f"global step = {step}, current reward = #{reward}, current episodic return = {current_reward_envs}")
 
             # reshape the log_pro to the shape (num_env)x1
             if model.action_type == 'discrete':
@@ -315,8 +343,10 @@ if __name__ == "__main__":
             state = next_state
             step += 1 * args.num_env
             # Evaluation over 1 episodes
+            '''
             if step % 5000 == 0:
                 test_reward = np.mean([test_env(model=model) for _ in range(1)])
+                print(f"evaluation at step {step}, episodic reward = {test_reward}")
                 if test_reward > best_reward:
                     best_reward = test_reward
                     torch.save(model.state_dict(), "best_model.pt")
@@ -330,7 +360,7 @@ if __name__ == "__main__":
                     )
                     if test_reward >= threshold_reward: early_stop = True
 
-
+            '''
 
             next_state = torch.FloatTensor(next_state).to(device)
         with torch.no_grad():
