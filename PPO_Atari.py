@@ -32,6 +32,8 @@ def parse_args():
     parser.add_argument("--max-step", type=int, default=10000000, help = "the maximum step of the experiment")
     parser.add_argument("--wandb-track", type=bool, default=False, help="the flag of tracking the experiment data")
     parser.add_argument("--seed-value", type=int, default=1, help="seed of the experiment")
+    parser.add_argument("--norm-adv", type=bool, default=True, help="the flag of normalizing the advantage")
+    parser.add_argument("--max-grad-norm", type=float, default=0.5, help="the maximum norm for the gradient clipping")
 
     # Agent specific arguments
     parser.add_argument("--num-env", type=int, default=8, help = "the number of parallel environments")
@@ -43,6 +45,7 @@ def parse_args():
     parser.add_argument("--clip-coef", type=float, default=0.1, help = "the surrogate clipping coefficient controlingt how much the policy distribution can be updated from the old policy distribution")
     parser.add_argument("--entro-coef", type=float, default=0.01, help = "the entropy coefficient controlling the exploration rate of the agent")
     parser.add_argument("--vf-coef", type=float, default=0.5, help = "the value function coefficient controlling the weight of value function loss in the total loss")
+    parser.add_argument("--clip-vloss", type=bool, default=True, help = "the flag that whether the vaule loss is clipped")
     parser.add_argument("--anneal-lr", type=bool, default=True, help="flag of using annealing learning rate")
 
     args = parser.parse_args()
@@ -54,10 +57,13 @@ def parse_args():
 def make_env(vis, env_name, seed):
     def _thunk():
         env = gym.make(env_name)
+        
         # revcording the agent performance
         if vis: env = gym.wrappers.RecordVideo(env, f"videos")
         env = AtariPreprocessing(env, screen_size=84, terminal_on_life_loss=True,grayscale_obs=True, frame_skip=4, noop_max=30)
         env = gym.wrappers.FrameStack(env,4)
+        # Put this wrapper after the atari wrappers, otherwise it doesn't work
+        env = gym.wrappers.RecordEpisodeStatistics(env)
         env.seed(seed)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
@@ -92,10 +98,10 @@ def test_env(vis = False, model = None):
         total_reward += reward
     return total_reward
 
-def init_weights(m):
-    if isinstance(m, nn.Linear):
-        nn.init.normal_(m.weight, mean = 0, std = 0.1)
-        nn.init.constant_(m.bias, 0.1)
+def layer_init(layer, std=np.sqrt(2), bias=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias)
+    return layer
 
 #PPO network
 class Actor_Critic(nn.Module):
@@ -105,23 +111,23 @@ class Actor_Critic(nn.Module):
         self.action_type = action_type
 
         self.shared_net = nn.Sequential(
-            nn.Conv2d(num_inputs_layer, 32, 8, stride=4),
+            layer_init(nn.Conv2d(num_inputs_layer, 32, 8, stride=4)),
             nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2),
+            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),
-            nn.Conv2d(64, 64, 3, stride=1),
+            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(64 * 7 * 7, 512),
+            layer_init(nn.Linear(64 * 7 * 7, 512)),
             nn.ReLU(),
         )
 
-        self.critic = nn.Linear(512, 1)
+        self.critic = layer_init(nn.Linear(512, 1), std=1)
 
-        self.actor = nn.Linear(512, num_outputs)
+        self.actor = layer_init(nn.Linear(512, num_outputs), std=0.01)
 
-        self.log_std = nn.Parameter(torch.ones(1, num_outputs) * std)
-        self.apply(init_weights)
+        #self.log_std = nn.Parameter(torch.ones(1, num_outputs) * std)
+        #self.apply(init_weights)
 
 
     def forward(self, x):
@@ -167,9 +173,9 @@ def ppo_iter(mini_batch_size, states, actions, log_probs, returns, advantage):
 
 def ppo_update(clip_coef, vf_coef, entro_coef, ppo_epochs, mini_batch_size, states, actions, log_probs, returns, advantages):
 
-    losses = torch.zeros(ppo_epochs)
-    actor_losses = torch.zeros(ppo_epochs)
-    critic_losses = torch.zeros(ppo_epochs)
+    #losses = torch.zeros(ppo_epochs)
+    #actor_losses = torch.zeros(ppo_epochs)
+    #critic_losses = torch.zeros(ppo_epochs)
 
     for i in range(ppo_epochs):
         # train on mini_batch
@@ -187,33 +193,45 @@ def ppo_update(clip_coef, vf_coef, entro_coef, ppo_epochs, mini_batch_size, stat
             log_ratio = (new_log_probs - old_log_probs)
             ratio = log_ratio.exp()    #new_pi(a | s) / old_pi(a | s)
 
+            approx_kl = ((ratio - 1)-log_ratio).mean()
+
             #if i == 0 and j == 0:
             #  print(ratio)
             # calculate approximate Kl between old pi and new pi
             #with torch.no_grad():
             #  old_approx_kl = (-log_ratio).mean()
-            #  approx_kl = ((ratio - 1) - log_ratio).mean()
+        
 
-            surr1 = ratio * advantage                        #new_pi(a | s) / old_pi(a | s) * A
-            surr2 = torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef) * advantage
+             #normalize the advantage
+            if args.norm_adv:
+                advantage = (advantage - advantage.mean())/ (advantage.std() + 1e-8)
 
-            actor_loss = - torch.min(surr1, surr2).mean()
+            surr1 = ratio * -advantage                        #new_pi(a | s) / old_pi(a | s) * A
+            surr2 = torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef) * -advantage
+
+            actor_loss = torch.max(surr1, surr2).mean()
+
+            #TO DO: clipped value loss
+            #if args.clip_vloss:
+            #    unclipped_critic_loss = (return_ - value).pow(2).mean()
+            #    clipped = 
             critic_loss = (return_ - value).pow(2).mean()      #MSE between true return and value function
 
-            actor_losses[i] = actor_loss
-            critic_losses[i] = critic_loss
+            #actor_losses[i] = actor_loss
+            #critic_losses[i] = critic_loss
 
 
             loss = vf_coef * critic_loss + actor_loss - entro_coef * entropy
-            losses[i] = loss
+            #losses[i] = loss
 
             j += 1
 
             optimizer.zero_grad()
             loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             optimizer.step()
 
-    return losses.mean(), actor_losses.mean(), critic_losses.mean()
+    return loss, actor_loss, critic_loss, entropy, approx_kl
 
   #print(f'Loss in step {frame_idx} is: {losses.mean()}')
   #print(f'KL in step {frame_idx} is: {approx_kl}')
@@ -248,7 +266,7 @@ if __name__ == "__main__":
 
 
     model = Actor_Critic(num_inputs_layer, num_outputs,  action_type=action_type).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, eps=1e-5)
 
 
     #initial wandb track
@@ -261,7 +279,8 @@ if __name__ == "__main__":
             save_code=True
         )
         wandb.define_metric("global_step")
-
+    
+    print(device)
     max_step = args.max_step
     step = 0
     test_rewards = []
@@ -306,7 +325,7 @@ if __name__ == "__main__":
             # interact to the envs
             next_state, reward, done, info = envs.step(action.cpu().numpy())   #send action to cpu and convert it to numpy
             
-            
+            '''
             #current_reward_envs = current_reward_envs + reward
             for env_index in range(args.num_env):
                 if not done[env_index]: 
@@ -324,7 +343,7 @@ if __name__ == "__main__":
                     current_reward_envs[env_index] = 0
 
                 #if reward[env_index] > 0: print(f"global step = {step}, current reward = #{reward}, current episodic return = {current_reward_envs}")
-
+            '''
             # reshape the log_pro to the shape (num_env)x1
             if model.action_type == 'discrete':
                 log_prob = log_prob.reshape(-1,1)
@@ -342,25 +361,23 @@ if __name__ == "__main__":
 
             state = next_state
             step += 1 * args.num_env
-            # Evaluation over 1 episodes
-            '''
-            if step % 5000 == 0:
-                test_reward = np.mean([test_env(model=model) for _ in range(1)])
-                print(f"evaluation at step {step}, episodic reward = {test_reward}")
-                if test_reward > best_reward:
-                    best_reward = test_reward
-                    torch.save(model.state_dict(), "best_model.pt")
-                test_rewards.append(test_reward)
-                #plot(step, test_rewards)
-                if args.wandb_track:
-                    wandb.define_metric("Test_reward", step_metric="Global_step")
-                    wandb.log(
-                        {"Test_reward": test_reward,
-                        "  Global_step": step}
-                    )
-                    if test_reward >= threshold_reward: early_stop = True
 
-            '''
+
+            
+            if "episode" in info:
+                for env in info['episode']:
+                    if env is not None:
+                        print(f"global_step={step}, episodic_return={env['r']}")
+                        if args.wandb_track:
+                                 wandb.define_metric("Episodic_reward", step_metric="Global_step")
+                                 wandb.define_metric("Episodic_lenth", step_metric="Global_step")
+                                 wandb.log(
+                                    {"Episodic_reward": env['r'],
+                                    "Episodic_lenth": env['l'],
+                                    "Global_step": step}
+                                 )
+                        break
+            
 
             next_state = torch.FloatTensor(next_state).to(device)
         with torch.no_grad():
@@ -378,8 +395,11 @@ if __name__ == "__main__":
         actions   = torch.cat(actions)
         advantage = returns - values
 
+       
 
-        loss, actor_loss, critic_loss = ppo_update(args.clip_coef, args.vf_coef, args.entro_coef, args.num_epoch, args.size_miniBatch, states, actions, log_probs, returns, advantage)
+
+
+        loss, actor_loss, critic_loss, entropy, approx_kl = ppo_update(args.clip_coef, args.vf_coef, args.entro_coef, args.num_epoch, args.size_miniBatch, states, actions, log_probs, returns, advantage)
         num_updates += 1
 
         if args.wandb_track:
@@ -387,12 +407,16 @@ if __name__ == "__main__":
             wandb.define_metric("Actor_loss", step_metric="Global_step")
             wandb.define_metric("Critic_loss", step_metric="Global_step")
             wandb.define_metric("Learning_rate", step_metric="Global_step")
+            wandb.define_metric("Entropy", step_metric="Global_step")
+            wandb.define_metric("Approx_KL", step_metric="Global_step")
             wandb.log(
             {
               "Total_loss": loss,
               "Actor_loss": actor_loss,
               "Critic_loss": critic_loss,
               "Learning_rate": lr,
+              "Entropy": entropy,
+              "Approx": approx_kl,
               "Global_step": step
             }
         )
