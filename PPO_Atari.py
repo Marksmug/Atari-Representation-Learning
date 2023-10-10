@@ -4,7 +4,6 @@ import time
 
 import gym
 from gym.wrappers import AtariPreprocessing
-#from gym.wrappers import Monitor
 import numpy as np
 import wandb
 
@@ -42,8 +41,8 @@ def parse_args():
     parser.add_argument("--max-grad-norm", type=float, default=0.5, help="the maximum norm for the gradient clipping")
 
     # Agent specific arguments
-    parser.add_argument("--num-env", type=int, default=1, help = "the number of parallel environments")
-    parser.add_argument("--horizon", type=int, default=8, help = "the number of step in each rollout")
+    parser.add_argument("--num-env", type=int, default=8, help = "the number of parallel environments")
+    parser.add_argument("--horizon", type=int, default=128, help = "the number of step in each rollout")
     parser.add_argument("--lam", type=float, default=0.95, help = "the lambda for estimating generalized advantage")
     parser.add_argument("--gamma", type=float, default=0.99, help = "the gamma for estimating generalizedd advantage")
     parser.add_argument("--num-epoch", type=int, default=4, help = "the number of epoch in each parameter update")
@@ -62,6 +61,9 @@ def parse_args():
     return args
 
 def make_env(vis, env_name, seed):
+    """
+    call this when creating environments
+    """
     def _thunk():
         env = gym.make(env_name)
         env = gym.wrappers.RecordEpisodeStatistics(env)
@@ -83,30 +85,29 @@ def make_env(vis, env_name, seed):
         return env
     return _thunk
 
-# orthogonal initialization of weight, constant initialization of bias
+ 
 def layer_init(layer, std=np.sqrt(2), bias=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias)
-    return layer
-
-def layer_init(layer, std=np.sqrt(2), bias=0.0):
+    """
+    orthogonal initialization of weight, 
+    constant initialization of bias
+    """
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias)
     return layer
 
 #PPO network
 class Actor_Critic(nn.Module):
+    """
+    a actor-critic network with a shared CNN
+    """
+
     def __init__(self, envs, action_type = 'discrete', std = 0.0):
         super(Actor_Critic, self).__init__()
 
         self.action_type = action_type
 
         self.shared_net = nn.Sequential(
-<<<<<<< HEAD
             layer_init(nn.Conv2d(4, 32, 8, stride=4)),
-=======
-            layer_init(nn.Conv2d(num_inputs_layer, 32, 8, stride=4)),
->>>>>>> b2f8942043e6855b072111072c9e5a024991eae7
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),
@@ -119,14 +120,7 @@ class Actor_Critic(nn.Module):
 
         self.critic = layer_init(nn.Linear(512, 1), std=1)
 
-<<<<<<< HEAD
         self.actor = layer_init(nn.Linear(512, envs.single_action_space.n), std=0.01)
-=======
-        self.actor = layer_init(nn.Linear(512, num_outputs), std=0.01)
-
-        #self.log_std = nn.Parameter(torch.ones(1, num_outputs) * std)
-        #self.apply(init_weights)
->>>>>>> b2f8942043e6855b072111072c9e5a024991eae7
 
 
     def forward(self, x):
@@ -151,6 +145,9 @@ class Actor_Critic(nn.Module):
 
 
 def compute_gae(gamma, lam, next_value, next_mask, rewards, masks, values):
+    """
+    call this when computing generalized advantage estimation
+    """
 
     next_value = next_value.reshape(1,-1)
     next_mask = next_mask.reshape(1, -1)
@@ -170,7 +167,9 @@ def compute_gae(gamma, lam, next_value, next_mask, rewards, masks, values):
 
 def ppo_update(clip_coef, vf_coef, entro_coef, ppo_epochs, mini_batch_size, batch_states, batch_actions, batch_log_probs, batch_returns, batch_advantages, batch_values):
 
-
+    """
+    call this when after every rollout
+    """
     batch_index = np.arange(args.batch_size)
     clipfracs = []
     for i in range(ppo_epochs):
@@ -317,7 +316,7 @@ if __name__ == "__main__":
             lr = frac * args.lr
             optimizer.param_groups[0]["lr"] = lr
 
-        # generate num_envs trajectories with num_steps of old policy
+        # generate num_envs rollouts with num_steps of old policy
         for step in range(args.horizon):
 
             global_step += 1 * args.num_env
@@ -343,7 +342,7 @@ if __name__ == "__main__":
             next_state = torch.FloatTensor(next_state).to(device)
             next_done = torch.FloatTensor(next_done).to(device)                        
 
-
+            # works in gym==0.25.2
             if "episode" in info:
                 for env in info['episode']:
                     if env is not None:
