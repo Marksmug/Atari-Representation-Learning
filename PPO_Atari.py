@@ -42,8 +42,8 @@ def parse_args():
     parser.add_argument("--max-grad-norm", type=float, default=0.5, help="the maximum norm for the gradient clipping")
 
     # Agent specific arguments
-    parser.add_argument("--num-env", type=int, default=8, help = "the number of parallel environments")
-    parser.add_argument("--horizon", type=int, default=128, help = "the number of step in each rollout")
+    parser.add_argument("--num-env", type=int, default=1, help = "the number of parallel environments")
+    parser.add_argument("--horizon", type=int, default=8, help = "the number of step in each rollout")
     parser.add_argument("--lam", type=float, default=0.95, help = "the lambda for estimating generalized advantage")
     parser.add_argument("--gamma", type=float, default=0.99, help = "the gamma for estimating generalizedd advantage")
     parser.add_argument("--num-epoch", type=int, default=4, help = "the number of epoch in each parameter update")
@@ -89,6 +89,11 @@ def layer_init(layer, std=np.sqrt(2), bias=0.0):
     torch.nn.init.constant_(layer.bias, bias)
     return layer
 
+def layer_init(layer, std=np.sqrt(2), bias=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias)
+    return layer
+
 #PPO network
 class Actor_Critic(nn.Module):
     def __init__(self, envs, action_type = 'discrete', std = 0.0):
@@ -97,7 +102,11 @@ class Actor_Critic(nn.Module):
         self.action_type = action_type
 
         self.shared_net = nn.Sequential(
+<<<<<<< HEAD
             layer_init(nn.Conv2d(4, 32, 8, stride=4)),
+=======
+            layer_init(nn.Conv2d(num_inputs_layer, 32, 8, stride=4)),
+>>>>>>> b2f8942043e6855b072111072c9e5a024991eae7
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 4, stride=2)),
             nn.ReLU(),
@@ -110,7 +119,14 @@ class Actor_Critic(nn.Module):
 
         self.critic = layer_init(nn.Linear(512, 1), std=1)
 
+<<<<<<< HEAD
         self.actor = layer_init(nn.Linear(512, envs.single_action_space.n), std=0.01)
+=======
+        self.actor = layer_init(nn.Linear(512, num_outputs), std=0.01)
+
+        #self.log_std = nn.Parameter(torch.ones(1, num_outputs) * std)
+        #self.apply(init_weights)
+>>>>>>> b2f8942043e6855b072111072c9e5a024991eae7
 
 
     def forward(self, x):
