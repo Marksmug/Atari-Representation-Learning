@@ -14,10 +14,10 @@ from torch.distributions import Normal
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exp-name", type=str, default="SAC_toy", help="the name of the experiment")
+    parser.add_argument("--exp-name", type=str, default="SAC", help="the name of the experiment")
     parser.add_argument("--seed-value", type=int, default=1, help =" the seed of the experiment")
     parser.add_argument("--wandb-track", type=bool, default=False, help = "the flag of tracking the experiment on WandB")
-    parser.add_argument("--env-name", type=str, default="Pendulum-v0")
+    parser.add_argument("--env-name", type=str, default="Hopper-v4")
     parser.add_argument("--env-num", type=int, default=1, help="the number of environments")
     parser.add_argument("--proj-name", type=str, default="SAC", help="the project name in the wandb")
 
@@ -50,7 +50,7 @@ def make_env(env_name, seed):
     return thunk
 
 class replayBuffer():
-    def __init__(self, obs_dim, act_dim, capacity):
+    def __init__(self, obs_dim, act_dim, capacity, device):
         self.capacity = capacity
         self.obs_buffer = np.zeros((capacity, obs_dim), dtype=np.float32)
         self.next_obs_buffer = np.zeros((capacity, obs_dim), dtype=np.float32)
@@ -86,7 +86,7 @@ class replayBuffer():
             done = self.done_buffer[idx]
         )   
         
-        return {key: torch.as_tensor(value, dtype=torch.float32) for key, value in batch.items()}
+        return {key: torch.as_tensor(value, dtype=torch.float32).to(device) for key, value in batch.items()}
 
 
 
@@ -267,7 +267,7 @@ if __name__=="__main__":
     q_optim = optim.Adam(list(Q_net1.parameters()) + list(Q_net2.parameters()), lr=args.q_lr)
 
     # initialize the replay buffer
-    rep_buffer = replayBuffer(envs.single_observation_space.shape[0], envs.single_action_space.shape[0], capacity=args.buf_capacity)
+    rep_buffer = replayBuffer(envs.single_observation_space.shape[0], envs.single_action_space.shape[0], capacity=args.buf_capacity, device=device)
 
     # start training
     obs = envs.reset()
@@ -285,24 +285,29 @@ if __name__=="__main__":
         
         next_obs, rewards, dones, infos = envs.step(actions)
 
-        # records the episodic reward
-        for item in infos:
-            if "episode" in item.keys():
-                print(f"episode_num={episode_num}, global_step={global_step}, episodic_return={item['episode']['r']}")
+
+        if "episode" in infos:
+            for info in infos["episode"]:
+                print(f"episode_num={episode_num}, global_step={global_step}, episodic_return={info['r']}")
                 episode_num += 1
                 if args.wandb_track:
-                        wandb.define_metric("Episodic_reward", step_metric="Episode")
-                        wandb.log(
-                        {"Episodic_reward": item['episode']['r'],
-                        "Episode": episode_num}
+                    wandb.define_metric("Episodic_reward", step_metric="Global step")
+                    wandb.define_metric("Episodic_length", step_metric="Global step")
+                    wandb.log(
+                        {"Episodic_reward": info['r'],
+                        "Episodic_length": info['l'],
+                        "Global step": global_step}
                     )
                 break
+
+
         
         # handle the terminal observation
         #real_next_obs = next_obs.copy()
         #for idx, d in enumerate(dones):
         #    if d:
-        #        real_next_obs[idx] = infos[idx]["terminal_observation"]
+                #print(infos)
+                #real_next_obs[idx] = infos[idx]["terminal_observation"]
 
         # store data into replay buffer
         rep_buffer.store(obs, actions,rewards, next_obs, dones)
