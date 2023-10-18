@@ -17,11 +17,12 @@ def parse_args():
     parser.add_argument("--exp-name", type=str, default="SAC", help="the name of the experiment")
     parser.add_argument("--seed-value", type=int, default=1, help =" the seed of the experiment")
     parser.add_argument("--wandb-track", type=bool, default=False, help = "the flag of tracking the experiment on WandB")
-    parser.add_argument("--env-name", type=str, default="Hopper-v4")
+    parser.add_argument("--env-name", type=str, default="Hopper-v2")
     parser.add_argument("--env-num", type=int, default=1, help="the number of environments")
     parser.add_argument("--proj-name", type=str, default="SAC", help="the project name in the wandb")
+    parser.add_argument("--capture-video", type=bool, default=False, help="the flag of capturing video")
 
-    parser.add_argument("--max-step", type=int, default=10000000, help = "the maximum step of the experiment")
+    parser.add_argument("--max-step", type=int, default=1000000, help = "the maximum step of the experiment")
     parser.add_argument("--explore-step", type=int, default=5000, help="the time step that used to expolre using random policy")
     parser.add_argument("--q-lr", type=float, default=1e-3, help="the learning rate of the Q function network")
     parser.add_argument("--policy-lr", type=float, default=3e-4, help="the learning rate of the policy network")
@@ -38,9 +39,15 @@ def parse_args():
 
 
 
-def make_env(env_name, seed):
+def make_env(env_name, seed, capture_video, run_name):
     def thunk():
-        env = gym.make(env_name)
+        
+        
+        if capture_video:
+            env = gym.make(env_name, render_mode="rgb_array")
+            env.wrappers.RecordVideo(env, f"video/{run_name}")
+        else:
+            env = gym.make(env_name)
         env = gym.wrappers.RecordEpisodeStatistics(env)
 
         env.seed(seed)
@@ -219,12 +226,6 @@ def sac_update(rep_buffer, actor, Q_net1, Q_net2, Q_target1, Q_target2, alpha):
         )
     
 
-    
-
-
-
-
-
 
 if __name__=="__main__":
     args = parse_args()
@@ -247,8 +248,8 @@ if __name__=="__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # create environment
-    envs = gym.vector.SyncVectorEnv([make_env(args.env_name, args.seed_value)]) 
+    # create environment (DOES NOT support paralle envs)
+    envs = gym.vector.SyncVectorEnv([make_env(args.env_name, args.seed_value, args.capture_video, run_name)]) 
     max_action = float(envs.single_action_space.high[0])
 
     # initialize the network:
@@ -302,15 +303,14 @@ if __name__=="__main__":
 
 
         
-        # handle the terminal observation
-        #real_next_obs = next_obs.copy()
-        #for idx, d in enumerate(dones):
-        #    if d:
-                #print(infos)
-                #real_next_obs[idx] = infos[idx]["terminal_observation"]
+        #handle the terminal observation
+        real_next_obs = next_obs.copy()
+        for idx, d in enumerate(dones):
+            if d:
+                real_next_obs[idx] = infos["episode"][0]["terminal_observation"]
 
         # store data into replay buffer
-        rep_buffer.store(obs, actions,rewards, next_obs, dones)
+        rep_buffer.store(obs, actions,rewards, real_next_obs, dones)
 
         obs = next_obs
 
