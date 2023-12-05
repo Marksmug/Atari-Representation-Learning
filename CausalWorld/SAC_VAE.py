@@ -118,7 +118,8 @@ def weight_init(m):
 class Encoder(nn.Module):
     def __init__(self, input_channel, latent_dims):
         super().__init__()
-
+        
+        self.latent_dims = latent_dims
         self.enCNN = nn.Sequential(
             nn.Conv2d(input_channel, 32, 4, stride = 2),
             nn.ReLU(),
@@ -131,8 +132,10 @@ class Encoder(nn.Module):
             nn.ReLU()
         )
 
-        self.fc_mu = nn.Linear(256 * 3 * 3, latent_dims)
-        self.fc_logvar = nn.Linear(256 * 3 * 3, latent_dims)
+        self.fc_mu = nn.Linear(256 * 3 * 3, self.latent_dims)
+        self.fc_logvar = nn.Linear(256 * 3 * 3, self.latent_dims)
+
+        
 
         self.apply(weight_init)
 
@@ -176,7 +179,7 @@ class Decoder(nn.Module):
     
 def loss_VAE(x_hat, x, mu, logvar, beta):
     # preprocessing image to [0, 1]
-    x = x/255
+    x = x/255.0
     recon_loss = ((x - x_hat)**2).sum()
     kl_loss = -0.5 * torch.sum(1 + logvar - mu**2 -  logvar.exp()).sum()
     #print("kl_loss: ", kl_loss)
@@ -195,7 +198,8 @@ def Pretrain_VAE(train_obs, encoder, decoder, optimizer, obs_layer, epoch = 10, 
             batch = train_obs[start:end]          #with shape batchsize x 84 x 84 x 3
 
             # normalize the batch
-            batch = torch.FloatTensor(batch).to(device)
+            #batch = torch.FloatTensor(batch).to(device)
+            
           
             batch = batch.view(-1,obs_layer, batch.shape[-2],batch.shape[-1])           #with shape batchsize x 3 x 84 x 84
             
@@ -214,6 +218,8 @@ def Pretrain_VAE(train_obs, encoder, decoder, optimizer, obs_layer, epoch = 10, 
 
 
 def update_VAE(obs, encoder, decoder, VAE_optimizer, beta=1):
+
+    
     z, mu, logvar = encoder(obs)
     obs_hat         = decoder(z)
 
@@ -262,6 +268,8 @@ class softQNet(nn.Module):
             nn.Linear(256, 1)
         )
 
+        self.ln = nn.LayerNorm(self.latent_dims)
+
         # apply the weight init
         self.apply(weight_init)
 
@@ -269,6 +277,7 @@ class softQNet(nn.Module):
     def forward(self, x, a, detach=True):
         # detach encoder allows to stop gradient propagation to the encoder
         x, _, _ = self.encoder(x)
+        x = self.ln(x)
         if detach:
             x.detach()
         assert x.shape[1] == self.latent_dims, "Encoder output dimention wrong"
@@ -300,6 +309,7 @@ class Actor(nn.Module):
             nn.ReLU()
         )
 
+        self.ln = nn.LayerNorm(self.latent_dims)
         self.fc_mean = nn.Linear(256, output_dims)
         self.fc_log_std = nn.Linear(256, output_dims)
 
@@ -311,6 +321,7 @@ class Actor(nn.Module):
     def forward(self, x, detach=True):
         # stop gradient propagation to the encoder
         x, _, _ = self.encoder(x)
+        x = self.ln(x)
         if  detach:
             x.detach()
         assert x.shape[1] == self.latent_dims, "Encoder output dimention wrong"
