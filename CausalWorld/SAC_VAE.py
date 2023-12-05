@@ -175,7 +175,8 @@ class Decoder(nn.Module):
         return x
     
 def loss_VAE(x_hat, x, mu, logvar, beta):
-    
+    # preprocessing image to [0, 1]
+    x = x/255
     recon_loss = ((x - x_hat)**2).sum()
     kl_loss = -0.5 * torch.sum(1 + logvar - mu**2 -  logvar.exp()).sum()
     #print("kl_loss: ", kl_loss)
@@ -194,7 +195,7 @@ def Pretrain_VAE(train_obs, encoder, decoder, optimizer, obs_layer, epoch = 10, 
             batch = train_obs[start:end]          #with shape batchsize x 84 x 84 x 3
 
             # normalize the batch
-            batch = torch.FloatTensor(batch).to(device)/255
+            batch = torch.FloatTensor(batch).to(device)
           
             batch = batch.view(-1,obs_layer, batch.shape[-2],batch.shape[-1])           #with shape batchsize x 3 x 84 x 84
             
@@ -208,7 +209,7 @@ def Pretrain_VAE(train_obs, encoder, decoder, optimizer, obs_layer, epoch = 10, 
             loss.backward()
             
             optimizer.step()
-        print("Current loss is ", loss.item())
+        print("Current loss is ", loss.item()/batch_size)
     print("Pretraining finished")
 
 
@@ -222,9 +223,10 @@ def update_VAE(obs, encoder, decoder, VAE_optimizer, beta=1):
     loss.backward()
 
     VAE_optimizer.step()
+    
     if global_step %100 == 0 and args.wandb_track: 
         wandb.define_metric("losses/VAE loss", step_metric = "Global_step")
-        wandb.log({"losses/VAE loss": loss.item(),
+        wandb.log({"losses/VAE loss": loss.item()/len(obs),
                    "Global_step": global_step})
         
 
