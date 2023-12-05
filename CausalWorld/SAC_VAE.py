@@ -28,7 +28,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     # environment hyperparameters
-    parser.add_argument("--exp-name", type=str, default="SAC_pixel_sharedNet_NoDelay_ReLU_weight_init", help="the name of the experiment")
+    parser.add_argument("--exp-name", type=str, default="SAC_VAE", help="the name of the experiment")
     parser.add_argument("--seed-value", type=int, default=1, help =" the seed of the experiment")
     parser.add_argument("--wandb-track", type=bool, default=False, help = "the flag of tracking the experiment on WandB")
     parser.add_argument("--task-name", type=str, default="pushing")
@@ -42,14 +42,14 @@ def parse_args():
     # VAE hyperparameters
     parser.add_argument("--beta", type=float, default=1, help="beta value of VAE")
     parser.add_argument("--latent-dims", type=int, default=100, help="the latent dimensions that VAE learns")
-    parser.add_argument("--VAE-lr", type=float, default=0.00005, help="the learning rate of VAE")
+    parser.add_argument("--VAE-lr", type=float, default=1e-4, help="the learning rate of VAE")
     parser.add_argument("--num-pre-epoches", type=int, default=100, help="the number of pretrain epoches")
 
     # SAC hyperparameters
     parser.add_argument("--max-step", type=int, default=10000000, help = "the maximum step of the experiment")
     parser.add_argument("--explore-step", type=int, default=2000, help="the time step that used to expolre using random policy")
-    parser.add_argument("--q-lr", type=float, default=5e-5, help="the learning rate of the Q function network")
-    parser.add_argument("--policy-lr", type=float, default=5e-5, help="the learning rate of the policy network")
+    parser.add_argument("--q-lr", type=float, default=1e-4, help="the learning rate of the Q function network")
+    parser.add_argument("--policy-lr", type=float, default=1e-4, help="the learning rate of the policy network")
     parser.add_argument("--buf-capacity", type=int, default=1000000,  help="the capacity of the replay buffer")
     parser.add_argument("--batch-size", type=int, default=256, help="the batch size used to train the networks")
     parser.add_argument("--auto-alpha", type=bool, default=True, help="the flag of using auto tuning alpha")
@@ -76,7 +76,7 @@ def make_env(task_name, skip_frame, seed, maximum_episode_length, observation_mo
         #                  dense_reward_weights=np.array(
         #                      [250, 0, 125, 0, 750, 0, 0, 0.005]),
         #                  fractional_reward_weight=1,
-        #                  tool_block_mass=0.02)
+        #                 tool_block_mass=0.02)
         if capture_video:
             env = CausalWorld(task=task, skip_frame=skip_frame, seed=seed, max_episode_length = maximum_episode_length, observation_mode = observation_mode, render_mode="rgb_array")
             # record the video every 250 episode
@@ -183,8 +183,8 @@ def loss_VAE(x_hat, x, mu, logvar, beta):
     loss = recon_loss + (beta * kl_loss)
     
     return loss
-def Pretrain_VAE(train_obs, encoder, decoder, optimizer, obs_layer, epoch = 100, batch_size = 256, beta = 1):
-    
+def Pretrain_VAE(train_obs, encoder, decoder, optimizer, obs_layer, epoch = 10, batch_size = 256, beta = 1):
+    print("Pretrainning VAE start...")
     for i in range(epoch):
         print("Epoch: ", i + 1)
         np.random.shuffle(train_obs)
@@ -194,10 +194,10 @@ def Pretrain_VAE(train_obs, encoder, decoder, optimizer, obs_layer, epoch = 100,
             batch = train_obs[start:end]          #with shape batchsize x 84 x 84 x 3
 
             # normalize the batch
-            batch = torch.FloatTensor(batch).to(device)
+            batch = torch.FloatTensor(batch).to(device)/255
           
             batch = batch.view(-1,obs_layer, batch.shape[-2],batch.shape[-1])           #with shape batchsize x 3 x 84 x 84
-
+            
 
             z, mu, logvar = encoder(batch)
             batch_hat = decoder(z)
@@ -209,9 +209,10 @@ def Pretrain_VAE(train_obs, encoder, decoder, optimizer, obs_layer, epoch = 100,
             
             optimizer.step()
         print("Current loss is ", loss.item())
+    print("Pretraining finished")
 
 
-def update_VAE(obs, encoder, decoder, VAE_optimizer, beta):
+def update_VAE(obs, encoder, decoder, VAE_optimizer, beta=1):
     z, mu, logvar = encoder(obs)
     obs_hat         = decoder(z)
 
@@ -221,6 +222,11 @@ def update_VAE(obs, encoder, decoder, VAE_optimizer, beta):
     loss.backward()
 
     VAE_optimizer.step()
+    if global_step %100 == 0 and args.wandb_track: 
+        wandb.define_metric("losses/VAE loss", step_metric = "Global_step")
+        wandb.log({"losses/VAE loss": loss.item(),
+                   "Global_step": global_step})
+        
 
 
 
@@ -260,7 +266,7 @@ class softQNet(nn.Module):
 
     def forward(self, x, a, detach=True):
         # detach encoder allows to stop gradient propagation to the encoder
-        x = self.encoder(x)
+        x, _, _ = self.encoder(x)
         if detach:
             x.detach()
         assert x.shape[1] == self.latent_dims, "Encoder output dimention wrong"
@@ -302,8 +308,8 @@ class Actor(nn.Module):
 
     def forward(self, x, detach=True):
         # stop gradient propagation to the encoder
-        x = self.encoder(x)
-        if detach:
+        x, _, _ = self.encoder(x)
+        if  detach:
             x.detach()
         assert x.shape[1] == self.latent_dims, "Encoder output dimention wrong"
         x = self.actor_net(x)
@@ -323,6 +329,7 @@ class Actor(nn.Module):
         return a, log_prob, mu
     
     def get_action(self, x):
+        
         mu, log_std = self.forward(x)
         std = log_std.exp()
         dist = Normal(mu, std)
@@ -471,6 +478,7 @@ if __name__=="__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    print(device)
     # create environment (DOES NOT support paralle envs)
     envs = gym.vector.SyncVectorEnv([make_env(args.task_name, args.skip_frame, args.seed_value, args.maximum_episode_length, args.observe_mode, args.capture_video, run_name)]) 
     max_action = float(envs.single_action_space.high[0])
@@ -517,7 +525,7 @@ if __name__=="__main__":
 
 
     episode_num = 0
-
+    episode_time = time.time()
     for global_step in range(args.max_step):
         # using random policy to explore the env before the the learning start
         # otherwise take actins from policy net
@@ -526,8 +534,6 @@ if __name__=="__main__":
         else:
             with torch.no_grad():
                 start = time.time()
-                #print(obs.shape)
-                
                 actions, _, _ , _= actor.get_action(torch.FloatTensor(obs).to(device))
                 end = time.time()
                 policy_forward_time = end - start
@@ -543,8 +549,10 @@ if __name__=="__main__":
 
 
         if "episode" in infos:
-            print(f"episode_num={episode_num}, global_step={global_step}, Episodic_reward={infos['episode'][0]['r']}, fractional_success={infos['fractional_success'][0]}")
+            episode_time = time.time() - episode_time 
+            print(f"episode_num={episode_num}, global_step={global_step}, Episodic_reward={infos['episode'][0]['r']}, fractional_success={infos['fractional_success'][0]},runing_time={episode_time}")
             episode_num += 1
+            episode_time = time.time()
             if args.wandb_track:
                 wandb.define_metric("Fractional_success", step_metric="Global step")
                 wandb.define_metric("Episodic_reward", step_metric="Global step")
@@ -572,15 +580,15 @@ if __name__=="__main__":
 
         if global_step == args.explore_step - 1:
 
-            train_obs = rep_buffer.obs_buffer.copy()
+            # only takes explored samples to pretrain the VAE
+            train_obs = rep_buffer.obs_buffer[0: args.explore_step-1].copy()
             Pretrain_VAE(train_obs, encoder, decoder, VAE_optimizor, obs_layer, args.num_pre_epoches, args.batch_size, args.beta)
 
         # update the networks after explorating phase
         if global_step > args.explore_step:
 
             batch = rep_buffer.sample(args.batch_size)
-            obs   = batch['obs']
-
+            train_obs   = batch['obs']
             # update SAC agent
             start = time.time()
             alpha = sac_update(global_step, batch, actor, Q_net, Q_target, alpha, policy_optim, q_optim)
@@ -589,7 +597,7 @@ if __name__=="__main__":
             update_time = end - start
 
             # update VAE
-            update_VAE(obs, encoder, decoder, args.beta)
+            update_VAE(train_obs, encoder, decoder, VAE_optimizor, args.beta)
             #print(f"network updating teime per step: {update_time}")
         
         
