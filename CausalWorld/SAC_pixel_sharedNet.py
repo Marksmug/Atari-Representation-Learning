@@ -123,7 +123,7 @@ class FeatureExtractor(nn.Module):
             nn.ReLU(),
             nn.Linear(256 * 3 * 3, 100),
             nn.LayerNorm(100),
-            nn.ReLU()
+            nn.Tanh()
         )
 
 
@@ -164,9 +164,9 @@ class softQNet(nn.Module):
 
 
     def forward(self, x, a):
-        x = self.CNN(x)
-        assert x.shape[1] == 100, "CNN output dimention wrong"
-        x = torch.cat([x,a], 1)
+        feats = self.CNN(x)
+        assert feats.shape[1] == 100, "CNN output dimention wrong"
+        x = torch.cat([feats,a], 1)
         q1 = self.q1_net(x)
         q2 = self.q2_net(x)
         return q1, q2
@@ -205,16 +205,16 @@ class Actor(nn.Module):
 
 
     def forward(self, x):
-        x = self.CNN(x)
+        feats = self.CNN(x)
 
-        assert x.shape[1] == 100, "CNN output dimention wrong"
-        x = self.actor_net(x)
+        assert feats.shape[1] == 100, "CNN output dimention wrong"
+        x = self.actor_net(feats)
         mu = self.fc_mean(x)
         log_std = self.fc_log_std(x)
         log_std = torch.tanh(log_std)
         log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)   # squashes the std into a range of reasonable values for a std
 
-        return mu, log_std
+        return mu, log_std, feats
     
     def squash(self, a, log_prob, mu):
         a = torch.tanh(a)
@@ -225,7 +225,7 @@ class Actor(nn.Module):
         return a, log_prob, mu
     
     def get_action(self, x):
-        mu, log_std = self.forward(x)
+        mu, log_std, x = self.forward(x)
         std = log_std.exp()
         dist = Normal(mu, std)
         entropy = dist.entropy()
@@ -236,7 +236,8 @@ class Actor(nn.Module):
         # squash the gaussian
         a, log_prob, mu = self.squash(a, log_prob, mu)
 
-        return a, log_prob, mu, entropy
+        #return x for monitor purpose
+        return a, log_prob, mu, entropy, x
         
 
 def sac_update(global_step, rep_buffer, actor, Q_net, Q_target, alpha, policy_optim, q_optim):
@@ -249,7 +250,7 @@ def sac_update(global_step, rep_buffer, actor, Q_net, Q_target, alpha, policy_op
     # Q networks updating
     start = time.time()
     with torch.no_grad():
-        netx_actions, next_log_probs, _, _ = actor.get_action(batch["next_obs"])
+        netx_actions, next_log_probs, _, _, _ = actor.get_action(batch["next_obs"])
         target_q1, target_q2 = Q_target(batch["next_obs"], netx_actions)
         
         min_target_q = torch.min(target_q1, target_q2) - alpha * next_log_probs
@@ -274,7 +275,7 @@ def sac_update(global_step, rep_buffer, actor, Q_net, Q_target, alpha, policy_op
             start = time.time()
             # update the policy multiple times to compensate for the delay
             #for _ in range(args.policy_frequency):
-            actions, log_probs, _, entropy = actor.get_action(batch["obs"])
+            actions, log_probs, _, entropy, x = actor.get_action(batch["obs"])
             q1_policy, q2_policy = Q_net(batch["obs"], actions)
             min_q_policy = torch.min(q1_policy, q2_policy).view(-1)
             policy_loss = ((alpha * log_probs) - min_q_policy).mean()
@@ -289,7 +290,7 @@ def sac_update(global_step, rep_buffer, actor, Q_net, Q_target, alpha, policy_op
         if args.auto_alpha:
             with torch.no_grad():
 
-                _, log_probs, _, _ = actor.get_action(batch["obs"])
+                _, log_probs, _, _, _ = actor.get_action(batch["obs"])
             alpha_loss = (-log_alpha.exp()*(log_probs+ target_entropy)).mean()
 
             a_optim.zero_grad()
@@ -325,6 +326,7 @@ def sac_update(global_step, rep_buffer, actor, Q_net, Q_target, alpha, policy_op
             "losses/Q_loss": q_loss.item() / 2.0,
             "losses/policy_loss": policy_loss.item(),
             "losses/entropy": entropy.mean().item(),
+            "features": wandb.Histogram(x.detach().cpu().numpy()),
             "Global_step": global_step
             }
             
@@ -422,7 +424,7 @@ if __name__=="__main__":
             actor.eval()
             with torch.no_grad():
                 start = time.time()
-                actions, _, _ , _= actor.get_action(torch.FloatTensor(obs).to(device))
+                actions, _, _ , _, _= actor.get_action(torch.FloatTensor(obs).to(device))
                 end = time.time()
                 policy_forward_time = end - start
                 #print('policy network forward time per step: ', policy_forward_time)
