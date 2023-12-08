@@ -134,7 +134,6 @@ class Encoder(nn.Module):
 
         self.fc_mu = nn.Linear(256 * 3 * 3, self.latent_dims)
         self.fc_logvar = nn.Linear(256 * 3 * 3, self.latent_dims)
-
         
 
         self.apply(weight_init)
@@ -152,6 +151,8 @@ class Encoder(nn.Module):
         logvar = self.fc_logvar(x)
         
         z = self.reparameterize(mu, logvar)
+
+        z 
         return z, mu, logvar
 
 class Decoder(nn.Module):
@@ -187,6 +188,8 @@ def loss_VAE(x_hat, x, mu, logvar, beta):
     loss = recon_loss + (beta * kl_loss)
     
     return loss
+
+
 def Pretrain_VAE(train_obs, encoder, decoder, optimizer, obs_layer, epoch = 10, batch_size = 256, beta = 1):
     print("Pretrainning VAE start...")
     for i in range(epoch):
@@ -198,7 +201,7 @@ def Pretrain_VAE(train_obs, encoder, decoder, optimizer, obs_layer, epoch = 10, 
             batch = train_obs[start:end]          #with shape batchsize x 84 x 84 x 3
 
             # normalize the batch
-            #batch = torch.FloatTensor(batch).to(device)
+            batch = torch.FloatTensor(batch).to(device)
             
           
             batch = batch.view(-1,obs_layer, batch.shape[-2],batch.shape[-1])           #with shape batchsize x 3 x 84 x 84
@@ -248,22 +251,21 @@ class softQNet(nn.Module):
         self.latent_dims = latent_dims
         # obs_shape = (x, 84, 84)
 
-        act_dim = np.prod(env.single_action_space.shape)
-
+        self.act_dim = np.prod(env.single_action_space.shape)
         
 
         self.q1_net = nn.Sequential(
-            nn.Linear(self.latent_dims + act_dim, 256),
-        #    nn.ReLU(),
-        #    nn.Linear(1024, 1024),
+            nn.Linear(self.latent_dims + self.act_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
             nn.ReLU(),
             nn.Linear(256, 1)
         )
 
         self.q2_net = nn.Sequential(
-            nn.Linear(self.latent_dims + act_dim, 256),
-        #    nn.ReLU(),
-        #    nn.Linear(1024, 1024),
+            nn.Linear(self.latent_dims + self.act_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
             nn.ReLU(),
             nn.Linear(256, 1)
         )
@@ -276,12 +278,13 @@ class softQNet(nn.Module):
 
     def forward(self, x, a, detach=True):
         # detach encoder allows to stop gradient propagation to the encoder
-        x, _, _ = self.encoder(x)
-        x = self.ln(x)
+        feats, _, _ = self.encoder(x)
+        feats = self.ln(feats)
+        feats = torch.tanh(feats)
         if detach:
-            x.detach()
-        assert x.shape[1] == self.latent_dims, "Encoder output dimention wrong"
-        x = torch.cat([x,a], 1)
+            feats = feats.detach()
+        assert feats.shape[1] == self.latent_dims, "Encoder output dimention wrong"
+        x = torch.cat([feats,a], 1)
         q1 = self.q1_net(x)
         q2 = self.q2_net(x)
         return q1, q2
@@ -299,33 +302,37 @@ class Actor(nn.Module):
         self.encoder = encoder
         self.latent_dims = latent_dims
 
-        output_dims = np.prod(env.single_action_space.shape)
+        self.action_dims = np.prod(env.single_action_space.shape)
 
 
         self.actor_net = nn.Sequential(
             nn.Linear(self.latent_dims, 256),
-        #    nn.ReLU(),
-        #    nn.Linear(1024, 1024),
+            nn.ReLU(),
+            nn.Linear(256, 256),
             nn.ReLU()
         )
 
         self.ln = nn.LayerNorm(self.latent_dims)
-        self.fc_mean = nn.Linear(256, output_dims)
-        self.fc_log_std = nn.Linear(256, output_dims)
+        self.fc_mean = nn.Linear(256, self.action_dims)
+        self.fc_log_std = nn.Linear(256, self.action_dims)
 
-
+        self.output = dict()
         # apply the weight init
         self.apply(weight_init)
 
 
     def forward(self, x, detach=True):
         # stop gradient propagation to the encoder
-        x, _, _ = self.encoder(x)
-        x = self.ln(x)
+        feats, _, _ = self.encoder(x)
+        self.output['z'] = feats
+        feats = self.ln(feats)
+        self.output['ln_z'] = feats
+        feats = torch.tanh(feats)
+        self.output['tanh_ln_z'] = feats
         if  detach:
-            x.detach()
-        assert x.shape[1] == self.latent_dims, "Encoder output dimention wrong"
-        x = self.actor_net(x)
+            feats = feats.detach()
+        assert feats.shape[1] == self.latent_dims, "Encoder output dimension wrong"
+        x = self.actor_net(feats)
         mu = self.fc_mean(x)
         log_std = self.fc_log_std(x)
         log_std = torch.tanh(log_std)
@@ -344,7 +351,9 @@ class Actor(nn.Module):
     def get_action(self, x):
         
         mu, log_std = self.forward(x)
+        assert mu.shape == (len(x), self.action_dims), f"mu is of shape {mu.shape}, here is the mu\n:{mu}"
         std = log_std.exp()
+        assert std.shape == (len(x), self.action_dims), f"mu is of shape {std.shape}, here is the mu\n:{std}"
         dist = Normal(mu, std)
         entropy = dist.entropy()
         # reparamatrition trick 
@@ -432,6 +441,7 @@ def sac_update(global_step, batch, actor, Q_net, Q_target, alpha, policy_optim, 
     if global_step % 100 ==0:
         #print("entropy: ", entropy.mean().item())
         if args.wandb_track:
+
             wandb.define_metric("losses/Q1_value", step_metric="Global_step")
             wandb.define_metric("losses/Q2_value", step_metric="Global_step")
             wandb.define_metric("losses/Q1_loss", step_metric="Global_step")
@@ -512,6 +522,11 @@ if __name__=="__main__":
     count_parameters(actor)
     count_parameters(Q_net)
 
+    if args.wandb_track:
+        wandb.watch(encoder, log='gradients')
+        wandb.watch(actor, log='gradients')
+        wandb.watch(Q_net, log='gradients')
+
     policy_optim = optim.Adam(list(actor.parameters()), lr=args.policy_lr)
     q_optim = optim.Adam(list(Q_net.parameters()), lr=args.q_lr)
     VAE_optimizor = optim.Adam(list(encoder.parameters())+list(decoder.parameters()), lr = args.VAE_lr)
@@ -550,6 +565,16 @@ if __name__=="__main__":
                 actions, _, _ , _= actor.get_action(torch.FloatTensor(obs).to(device))
                 end = time.time()
                 policy_forward_time = end - start
+                if args.wandb_track and global_step % 100 == 0:
+                    wandb.define_metric("z", step_metric="Global_step")
+                    wandb.define_metric("ln_z", step_metric="Global_step")
+                    wandb.define_metric("tanh_ln_z", step_metric="Global_step")
+                    wandb.log({
+                        "z": wandb.Histogram(actor.output['z'].detach().cpu().numpy()),
+                        "ln_z": wandb.Histogram(actor.output['ln_z'].detach().cpu().numpy()),
+                        "tanh_ln_z": wandb.Histogram(actor.output['tanh_ln_z'].detach().cpu().numpy()),
+                        "Global_step": global_step
+                    })
                 #print('policy network forward time per step: ', policy_forward_time)
                 
             actions = actions.detach().cpu().numpy()
@@ -591,7 +616,7 @@ if __name__=="__main__":
 
         obs = next_obs
 
-        if global_step == args.explore_step - 1:
+        if global_step == args.explore_step :
 
             # only takes explored samples to pretrain the VAE
             train_obs = rep_buffer.obs_buffer[0: args.explore_step-1].copy()
