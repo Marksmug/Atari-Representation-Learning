@@ -1,0 +1,14 @@
+1. env init error with pixel mode
+Description:
+when initaliz the env with pixel observation mode, the _reset_oobservation_space() function raise the the error
+AttributeError: 'CausalWorld' object has no attribute 'observation_space'.
+Possible Reason:
+self.observation_space does not exisit before excute _reset_observation_space()
+Temporary solution:
+check whether the self.observation_space exist 
+if self._observation_mode == "pixel" and self.observation_space is None:
+				|
+				∨
+if self._observation_mode == "pixel" and (hasattr(self, 'observation_space') is False or self.observation_space is None):
+Outcome:
+env initialized correctly
